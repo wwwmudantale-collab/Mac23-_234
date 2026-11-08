@@ -76,3 +76,85 @@ jobs:
         app-name: ${{ env.AZURE_WEBAPP_NAME }}
         publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+## app.py
+# Generic restoration API. Connect restore_system() to your platform's
+# approved backup/restore provider before using it in production.
+
+import os
+import secrets
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="Restoration API", version="1.0.0")
+
+API_TOKEN = os.environ.get("RESTORE_API_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError("Set the RESTORE_API_TOKEN environment variable")
+
+last_restore: Optional[dict] = None
+
+
+class RestoreRequest(BaseModel):
+    backup_id: str = Field(min_length=1, max_length=200)
+    confirm: bool = Field(
+        description="Must be true to authorize a restoration."
+    )
+
+
+def restore_system(backup_id: str) -> None:
+    """
+    Implement this with your system's trusted restore provider.
+    Keep backup selection restricted to authorized backup IDs.
+    """
+    raise NotImplementedError("Connect this function to your restore provider")
+
+
+def require_token(authorization: Optional[str]) -> None:
+    expected = f"Bearer {API_TOKEN}"
+    if authorization is None or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/restore")
+def restore(
+    request: RestoreRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    global last_restore
+    require_token(authorization)
+
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="Set confirm=true to proceed")
+
+    try:
+        restore_system(request.backup_id)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Restoration failed")
+
+    last_restore = {
+        "backup_id": request.backup_id,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "status": "completed",
+    }
+    return last_restore
+
+
+@app.get("/restore/status")
+def restore_status(authorization: Optional[str] = Header(default=None)):
+    require_token(authorization)
+    return last_restore or {"status": "no restorations recorded"}
+## requirements.txt
+fastapi
+uvicorn[standard]
+#export RESTORE_API_TOKEN='replace-with-a-long-random-secret'
+uvicorn app:app --host 127.0.0.1 --port 8000
